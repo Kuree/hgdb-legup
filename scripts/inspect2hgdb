@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+
+"""
+Convert Inspect database to hgdb
+Most of the implementation comes from the LegUp source code. Modifications are made to
+move to modern Python and MySQL connector
+"""
+import MySQLdb
+from MySQLdb import Connect
+import argparse
+import os
+import getpass
+
+
+# some constants used by legup
+MYSQL_DATABASE_NAME = "legupDebug"
+
+
+def get_input_args():
+    parser = argparse.ArgumentParser(os.path.basename(__file__), description="Convert Inspect database to hgdb")
+    parser.add_argument("output", help="Output symbol table")
+    parser.add_argument("-p", help="Use password", action="store_true")
+    parser.add_argument("-u", help="User name", type=str, default="root", required=False)
+    args = parser.parse_args()
+    if args.p:
+        password = getpass.getpass(f"MySQL password for {args.u}")
+    else:
+        password = "letmein"
+
+    # get mysql connection here
+    connection = Connect(host="localhost", user=args.u, password=password, database=MYSQL_DATABASE_NAME)
+    return connection, args.output
+
+
+class LegUpDatabase:
+    # notice that legup database is flat, which fits perfectly well with the sqlite version
+    # of the symbol table. we will translate the symbol table
+    def __init__(self, connection: MySQLdb.connections.Connection):
+        self.cursor = MySQLdb.cursors.Cursor(connection)
+        # making sure there is only one design
+        self.top_id = self.__get_design_top()
+
+    def __get_design_top(self):
+        self.cursor.execute("SELECT id, name FROM Designs")
+        res = self.cursor.fetchall()
+        if len(res) == 0:
+            raise RuntimeError("No design found")
+        elif len(res) != 1:
+            # design name selection currently not supported
+            raise RuntimeError("More than one design found. Please specify design name")
+        else:
+            return res[0]
+
+
+def main():
+    connection, output_filename = get_input_args()
+    legup_database = LegUpDatabase(connection)
+
+
+if __name__ == "__main__":
+    main()
+
