@@ -40,8 +40,10 @@ class LegUpDatabase:
         # making sure there is only one design
         self.top_id = self.__get_design_top()
         self.scopes = {}
+        self.instance_hierarchy = {}
         self.instances = {}
         self.breakpoints = {}
+        self.states = {}
         self.rtl_signals = {}
         self.variables = {}
         self.variable_link = {}
@@ -49,6 +51,7 @@ class LegUpDatabase:
         # populate the information
         self.__get_scopes()
         self.__get_instances()
+        self.__get_instance_hierarchy()
         self.__get_breakpoints()
         self.__get_rtl_vars()
         self.__get_variables()
@@ -77,6 +80,15 @@ class LegUpDatabase:
         for instance_id, instance_num, func_id in res:
             self.instances[instance_id] = (instance_num, func_id)
 
+    def __get_instance_hierarchy(self):
+        self.cursor.execute("SELECT instanceId, childInstanceId FROM InstanceChildren ic "
+                            "INNER JOIN Instance i ON i.id = ic.instanceId WHERE  i.designId = ?", self.top_id)
+        res = self.cursor.fetchall()
+        for instance_id, child_instance_id in res:
+            if instance_id not in self.instance_hierarchy:
+                self.instance_hierarchy[instance_id] = set()
+            self.instance_hierarchy[instance_id].add(child_instance_id)
+
     def __get_breakpoints(self):
         # the only breakpoints available is through IR instructions
         self.cursor.execute(
@@ -86,6 +98,13 @@ class LegUpDatabase:
         res = self.cursor.fetchall()
         for ir_id, func_id, start_id, end_id, file, line, column in res:
             self.breakpoints[ir_id] = (func_id, start_id, end_id, file, line, column)
+
+        # get states as well
+        self.cursor.execute("SELECT s.id, belongingFunctionId, number FROM State s "
+                            "INNER JOIN `Function` f ON s.belongingFunctionId = f.id WHERE f.designId = ?", self.top_id)
+        res = self.cursor.fetchall()
+        for s_id, func_id, value in res:
+            self.states[s_id] = (func_id, value)
 
     def __get_rtl_vars(self):
         # reads out all the RTL signals
@@ -117,8 +136,118 @@ class LegUpDatabase:
         for vss_id, var_id, rtl_id in res:
             self.variable_link[vss_id] = (var_id, rtl_id)
 
+    def __get_top_instance_id(self):
+        # top does not have parents
+        tops = set()
+        for inst_id in self.instances.keys():
+            tops.add(inst_id)
+        for inst_id in self.instance_hierarchy.keys():
+            tops.remove(inst_id)
+
+        assert len(tops) == 1, "Unable to find top instance"
+        return tops.pop()
+
+    def __get_instance_name(self, inst_id):
+        _, function_id = self.instances[inst_id]
+        _, name = self.scopes[function_id]
+        return name
+
+    def __resolve_instances(self, db: hgdb.DebugSymbolTable):
+        # we assume there is only one function call in the parent scope, which
+        # might not be true. this is good enough for a proof-of-concept
+        instances_names = {}
+        top_instance = self.__get_top_instance_id()
+        instances_names[top_instance] = self.__get_instance_name(top_instance)
+        for inst, children in self.instance_hierarchy:
+            instance_name = instances_names[inst]
+            for child in children:
+                name = self.__get_instance_name(child)
+                name = f"{instance_name}.{name}"
+                instances_names[child] = name
+
+        # create the instance table
+        for inst_id, instance_name in instances_names:
+            db.store_instance(inst_id, instance_name)
+
+    def __resolve_breakpoints_scope(self, db: hgdb.DebugSymbolTable):
+        # first reverse index the funcID <-> Instance id
+        func_id_instances = {}
+        for instance_id, (_, func_id) in self.instances.values():
+            if func_id not in func_id_instances:
+                func_id_instances[func_id] = set()
+            func_id_instances[func_id].add(instance_id)
+
+        # organize the breakpoints based on scope
+        scopes = {}
+        for ir_id, (func_id, start_id, end_id, file, line, column) in self.breakpoints:
+            scopes[func_id] = (ir_id, start_id, end_id, file, line, column)
+
+        # create scope
+        scope_id = 0
+        # notice that there could be duplication due to the flattening
+        bp_id = 0
+        # indexed by instance and then func_id
+        scope_list = {}
+        # map the file, line, column to bp id so that later one we can use it to map
+        # context values
+        bp_location = {}
+        for func_id, (ir_id, start_id, end_id, file, line, column) in scopes.values():
+            for inst_id in func_id_instances[func_id]:
+                start_value = self.states[start_id][-1]
+                end_value = self.states[end_id][-1]
+                # this is a hardcoded value in inspect from the source code
+                var = "cur_state"
+
+                if inst_id not in scope_list:
+                    scope_list[inst_id] = {}
+                if func_id not in scope_list[inst_id]:
+                    scope_list[inst_id][func_id] = []
+                scope_list[inst_id][func_id].append(bp_id)
+
+                # compute condition
+                conditions = []
+                for i in range(start_value, end_value + 1):
+                    conditions.append(f"({var} == {i})")
+                cond = " || ".join(conditions)
+
+                db.store_breakpoint(bp_id, inst_id, file, line, column, cond)
+
+                # store the location for mapping
+                if func_id not in bp_location:
+                    bp_location[func_id] = {}
+                bp_location[func_id][bp_id] = (file, line)
+                bp_id += 1
+
+        scope_id = 0
+        for scopes in scope_list.values():
+            for scope in scopes.values():
+                scope.sort(key=lambda b_id: bp_location[b_id])
+                db.store_scope(scope_id, *scope)
+                scope_id += 1
+
+        return bp_location
+
+    def __resolve_context_variable(self, db: hgdb.DebugSymbolTable, bp_location):
+        for var_id, rtl_id in self.variable_link.values():
+            var = self.variables[var_id]
+            rtl = self.rtl_signals[rtl_id]
+            var_name, func_id, file, line = var
+            rtl_name = rtl[-1]
+            # create variable
+            db.store_variable(var_id, rtl_name)
+            # need to find matching bp locations
+            bps = bp_location[func_id]
+            for bp_id, (bp_file, bp_line) in bps.items():
+                if bp_file == file and bp_line >= line:
+                    db.store_context_variable(var_name, bp_id, var_id)
+
     def convert(self, output):
         db = hgdb.DebugSymbolTable(output)
+        # resolve instance names and stuff.
+        self.__resolve_instances(db)
+
+        bp_location = self.__resolve_breakpoints_scope(db)
+        self.__resolve_context_variable(db, bp_location)
 
 
 def main():
