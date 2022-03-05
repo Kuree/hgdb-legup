@@ -21,6 +21,8 @@ def get_input_args():
     parser.add_argument("output", help="Output symbol table")
     parser.add_argument("-p", help="Use password", action="store_true")
     parser.add_argument("-u", help="User name", type=str, default="root", required=False)
+    parser.add_argument("-H", "--host", default="127.0.0.1", help="Inspect MySQL host", type=str, dest="host")
+    parser.add_argument("-P", "--port", default=3306, help="Inspect MySQL port", type=int, dest="port")
     args = parser.parse_args()
     if args.p:
         password = getpass.getpass(f"MySQL password for {args.u}")
@@ -28,14 +30,15 @@ def get_input_args():
         password = "letmein"
 
     # get mysql connection here
-    connection = Connect(host="localhost", user=args.u, password=password, database=MYSQL_DATABASE_NAME)
+    connection = Connect(host=args.host, user=args.u, password=password, database=MYSQL_DATABASE_NAME,
+                         port=args.port)
     return connection, args.output
 
 
 class LegUpDatabase:
     # notice that legup database is flat, which fits perfectly well with the sqlite version
     # of the symbol table. we will translate the symbol table
-    def __init__(self, connection: MySQLdb.connections.Connection):
+    def __init__(self, connection):
         self.cursor = MySQLdb.cursors.Cursor(connection)
         # making sure there is only one design
         self.top_id = self.__get_design_top()
@@ -57,7 +60,7 @@ class LegUpDatabase:
         self.__get_variables()
 
     def __get_design_top(self):
-        self.cursor.execute("SELECT id, name FROM Designs")
+        self.cursor.execute("SELECT id FROM Designs")
         res = self.cursor.fetchall()
         if len(res) == 0:
             raise RuntimeError("No design found")
@@ -65,24 +68,24 @@ class LegUpDatabase:
             # design name selection currently not supported
             raise RuntimeError("More than one design found. Please specify design name")
         else:
-            return res[0]
+            return res[0][0]
 
     def __get_scopes(self):
         # in LegUp they callit functions. we treat it as scopes
-        self.cursor.execute("SELECT id, name FROM Function WHERE designId = ?", self.top_id)
+        self.cursor.execute("SELECT id, name FROM `Function` WHERE designId = %s", (self.top_id, ))
         res = self.cursor.fetchall()
         for func_id, func_name in res:
             self.scopes[func_id] = func_name
 
     def __get_instances(self):
-        self.cursor.execute("SELECT id, instanceNum, functionId FROM Instance WHERE designID = ?", self.top_id)
+        self.cursor.execute("SELECT id, instanceNum, functionId FROM Instance WHERE designID = %s", (self.top_id,))
         res = self.cursor.fetchall()
         for instance_id, instance_num, func_id in res:
             self.instances[instance_id] = (instance_num, func_id)
 
     def __get_instance_hierarchy(self):
         self.cursor.execute("SELECT instanceId, childInstanceId FROM InstanceChildren ic "
-                            "INNER JOIN Instance i ON i.id = ic.instanceId WHERE  i.designId = ?", self.top_id)
+                            "INNER JOIN Instance i ON i.id = ic.instanceId WHERE  i.designId = %s", (self.top_id,))
         res = self.cursor.fetchall()
         for instance_id, child_instance_id in res:
             if instance_id not in self.instance_hierarchy:
@@ -93,15 +96,15 @@ class LegUpDatabase:
         # the only breakpoints available is through IR instructions
         self.cursor.execute(
             "SELECT ir.id, functionId, startStateId, endStateId, filePath, lineNumber, columnNumber FROM "
-            "IRInstr ir INNER JOIN `Function` f on f.id = ir.functionID WHERE f.designID = ?",
-            self.top_id)
+            "IRInstr ir INNER JOIN `Function` f on f.id = ir.functionID WHERE f.designID = %s", (self.top_id,))
         res = self.cursor.fetchall()
         for ir_id, func_id, start_id, end_id, file, line, column in res:
             self.breakpoints[ir_id] = (func_id, start_id, end_id, file, line, column)
 
         # get states as well
         self.cursor.execute("SELECT s.id, belongingFunctionId, number FROM State s "
-                            "INNER JOIN `Function` f ON s.belongingFunctionId = f.id WHERE f.designId = ?", self.top_id)
+                            "INNER JOIN `Function` f ON s.belongingFunctionId = f.id WHERE f.designId = %s",
+                            (self.top_id,))
         res = self.cursor.fetchall()
         for s_id, func_id, value in res:
             self.states[s_id] = (func_id, value)
@@ -109,8 +112,8 @@ class LegUpDatabase:
     def __get_rtl_vars(self):
         # reads out all the RTL signals
         self.cursor.execute("SELECT r.id, functionID, signalName "
-                            "FROM RtlSignal r INNER JOIN `Function` f ON f.id = r.functionId WHERE f.designId = ?",
-                            self.top_id)
+                            "FROM RtlSignal r INNER JOIN `Function` f ON f.id = r.functionId WHERE f.designId = %s",
+                            (self.top_id,))
         res = self.cursor.fetchall()
         for r_id, func_id, name in res:
             self.rtl_signals[r_id] = (func_id, name)
@@ -118,8 +121,8 @@ class LegUpDatabase:
     def __get_variables(self):
         # get all the variables
         # notice that we ignore global variables right now
-        self.cursor.execute("SELECT id, name, functionId, filePath, lineNumber FROM Variable WHERE designId = ?",
-                            self.top_id)
+        self.cursor.execute("SELECT id, name, functionId, filePath, lineNumber FROM Variable WHERE designId = %s",
+                            (self.top_id,))
         res = self.cursor.fetchall()
         for id, name, func_id, file, line in res:
             if func_id is not None:
@@ -130,8 +133,7 @@ class LegUpDatabase:
         self.cursor.execute(
             "SELECT vss.id, IRInstrId, v.id, rtlSignalId FROM VariableSourceSignal vss "
             "INNER JOIN VariableSource vs on vss.VariableSourceId = vs.id "
-            "INNER JOIN Variable v on v.id = vs.variableId WHERE v.designId = %s",
-            self.top_id)
+            "INNER JOIN Variable v on v.id = vs.variableId WHERE v.designId = %s", (self.top_id,))
         res = self.cursor.fetchall()
         for vss_id, var_id, rtl_id in res:
             self.variable_link[vss_id] = (var_id, rtl_id)
@@ -141,15 +143,16 @@ class LegUpDatabase:
         tops = set()
         for inst_id in self.instances.keys():
             tops.add(inst_id)
-        for inst_id in self.instance_hierarchy.keys():
-            tops.remove(inst_id)
+        for inst_ids in self.instance_hierarchy.values():
+            for inst_id in inst_ids:
+                tops.remove(inst_id)
 
         assert len(tops) == 1, "Unable to find top instance"
         return tops.pop()
 
     def __get_instance_name(self, inst_id):
         _, function_id = self.instances[inst_id]
-        _, name = self.scopes[function_id]
+        name = self.scopes[function_id]
         return name
 
     def __resolve_instances(self, db: hgdb.DebugSymbolTable):
@@ -158,7 +161,7 @@ class LegUpDatabase:
         instances_names = {}
         top_instance = self.__get_top_instance_id()
         instances_names[top_instance] = self.__get_instance_name(top_instance)
-        for inst, children in self.instance_hierarchy:
+        for inst, children in self.instance_hierarchy.items():
             instance_name = instances_names[inst]
             for child in children:
                 name = self.__get_instance_name(child)
@@ -166,21 +169,23 @@ class LegUpDatabase:
                 instances_names[child] = name
 
         # create the instance table
-        for inst_id, instance_name in instances_names:
+        for inst_id, instance_name in instances_names.items():
             db.store_instance(inst_id, instance_name)
 
     def __resolve_breakpoints_scope(self, db: hgdb.DebugSymbolTable):
         # first reverse index the funcID <-> Instance id
         func_id_instances = {}
-        for instance_id, (_, func_id) in self.instances.values():
+        for instance_id, (_, func_id) in self.instances.items():
             if func_id not in func_id_instances:
                 func_id_instances[func_id] = set()
             func_id_instances[func_id].add(instance_id)
 
         # organize the breakpoints based on scope
         scopes = {}
-        for ir_id, (func_id, start_id, end_id, file, line, column) in self.breakpoints:
-            scopes[func_id] = (ir_id, start_id, end_id, file, line, column)
+        for ir_id, (func_id, start_id, end_id, file, line, column) in self.breakpoints.items():
+            if func_id not in scopes:
+                scopes[func_id] = []
+            scopes[func_id].append((ir_id, start_id, end_id, file, line, column))
 
         # create scope
         scope_id = 0
@@ -191,37 +196,38 @@ class LegUpDatabase:
         # map the file, line, column to bp id so that later one we can use it to map
         # context values
         bp_location = {}
-        for func_id, (ir_id, start_id, end_id, file, line, column) in scopes.values():
-            for inst_id in func_id_instances[func_id]:
-                start_value = self.states[start_id][-1]
-                end_value = self.states[end_id][-1]
-                # this is a hardcoded value in inspect from the source code
-                var = "cur_state"
+        for func_id, bps in scopes.items():
+            for ir_id, start_id, end_id, file, line, column in bps:
+                for inst_id in func_id_instances[func_id]:
+                    start_value = self.states[start_id][-1]
+                    end_value = self.states[end_id][-1]
+                    # this is a hardcoded value in inspect from the source code
+                    var = "cur_state"
 
-                if inst_id not in scope_list:
-                    scope_list[inst_id] = {}
-                if func_id not in scope_list[inst_id]:
-                    scope_list[inst_id][func_id] = []
-                scope_list[inst_id][func_id].append(bp_id)
+                    if inst_id not in scope_list:
+                        scope_list[inst_id] = {}
+                    if func_id not in scope_list[inst_id]:
+                        scope_list[inst_id][func_id] = []
+                    scope_list[inst_id][func_id].append(bp_id)
 
-                # compute condition
-                conditions = []
-                for i in range(start_value, end_value + 1):
-                    conditions.append(f"({var} == {i})")
-                cond = " || ".join(conditions)
+                    # compute condition
+                    conditions = []
+                    for i in range(start_value, end_value + 1):
+                        conditions.append(f"({var} == {i})")
+                    cond = " || ".join(conditions)
 
-                db.store_breakpoint(bp_id, inst_id, file, line, column, cond)
+                    db.store_breakpoint(bp_id, inst_id, file, line, column, cond)
 
-                # store the location for mapping
-                if func_id not in bp_location:
-                    bp_location[func_id] = {}
-                bp_location[func_id][bp_id] = (file, line)
-                bp_id += 1
+                    # store the location for mapping
+                    if func_id not in bp_location:
+                        bp_location[func_id] = {}
+                    bp_location[func_id][bp_id] = (file, line)
+                    bp_id += 1
 
         scope_id = 0
         for scopes in scope_list.values():
-            for scope in scopes.values():
-                scope.sort(key=lambda b_id: bp_location[b_id])
+            for func_id, scope in scopes.items():
+                scope.sort(key=lambda b_id: bp_location[func_id][b_id])
                 db.store_scope(scope_id, *scope)
                 scope_id += 1
 
