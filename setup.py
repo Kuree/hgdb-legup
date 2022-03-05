@@ -17,6 +17,7 @@ setup(
     url="https://github.com/Kuree/hgdb-legup",
     install_requires=[
         "mysqlclient",
+        "hgdb"
     ],
     scripts=["scripts/inspect2hgdb"],
     python_requires=">=3.6"
