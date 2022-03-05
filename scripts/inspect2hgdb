@@ -10,7 +10,7 @@ from MySQLdb import Connect
 import argparse
 import os
 import getpass
-
+import hgdb
 
 # some constants used by legup
 MYSQL_DATABASE_NAME = "legupDebug"
@@ -39,6 +39,19 @@ class LegUpDatabase:
         self.cursor = MySQLdb.cursors.Cursor(connection)
         # making sure there is only one design
         self.top_id = self.__get_design_top()
+        self.scopes = {}
+        self.instances = {}
+        self.breakpoints = {}
+        self.rtl_signals = {}
+        self.variables = {}
+        self.variable_link = {}
+
+        # populate the information
+        self.__get_scopes()
+        self.__get_instances()
+        self.__get_breakpoints()
+        self.__get_rtl_vars()
+        self.__get_variables()
 
     def __get_design_top(self):
         self.cursor.execute("SELECT id, name FROM Designs")
@@ -51,12 +64,68 @@ class LegUpDatabase:
         else:
             return res[0]
 
+    def __get_scopes(self):
+        # in LegUp they callit functions. we treat it as scopes
+        self.cursor.execute("SELECT id, name FROM Function WHERE designId = ?", self.top_id)
+        res = self.cursor.fetchall()
+        for func_id, func_name in res:
+            self.scopes[func_id] = func_name
+
+    def __get_instances(self):
+        self.cursor.execute("SELECT id, instanceNum, functionId FROM Instance WHERE designID = ?", self.top_id)
+        res = self.cursor.fetchall()
+        for instance_id, instance_num, func_id in res:
+            self.instances[instance_id] = (instance_num, func_id)
+
+    def __get_breakpoints(self):
+        # the only breakpoints available is through IR instructions
+        self.cursor.execute(
+            "SELECT ir.id, functionId, startStateId, endStateId, filePath, lineNumber, columnNumber FROM "
+            "IRInstr ir INNER JOIN Function f on f.id = ir.functionID WHERE f.designID = ?",
+            self.top_id)
+        res = self.cursor.fetchall()
+        for ir_id, func_id, start_id, end_id, file, line, column in res:
+            self.breakpoints[ir_id] = (func_id, start_id, end_id, file, line, column)
+
+    def __get_rtl_vars(self):
+        # reads out all the RTL signals
+        self.cursor.execute("SELECT r.id, functionID, signalName "
+                            "FROM RtlSignal r INNER JOIN Function f ON f.id = r.functionId WHERE f.designId = ?",
+                            self.top_id)
+        res = self.cursor.fetchall()
+        for r_id, func_id, name in res:
+            self.rtl_signals[r_id] = (func_id, name)
+
+    def __get_variables(self):
+        # get all the variables
+        # notice that we ignore global variables right now
+        self.cursor.execute("SELECT id, name, functionId, filePath, lineNumber FROM Variable WHERE designId = ?",
+                            self.top_id)
+        res = self.cursor.fetchall()
+        for id, name, func_id, file, line in res:
+            if func_id is not None:
+                self.variables[id] = (name, func_id, file, line)
+
+    def __get_variable_link(self):
+        # get the linking between variable and rtl signals
+        self.cursor.execute(
+            "SELECT vss.id, IRInstrId, v.id, rtlSignalId FROM VariableSourceSignal vss "
+            "INNER JOIN VariableSource vs on vss.VariableSourceId = vs.id "
+            "INNER JOIN Variable v on v.id = vs.variableId WHERE v.designId = %s",
+            self.top_id)
+        res = self.cursor.fetchall()
+        for vss_id, var_id, rtl_id in res:
+            self.variable_link[vss_id] = (var_id, rtl_id)
+
+    def convert(self, output):
+        db = hgdb.DebugSymbolTable(output)
+
 
 def main():
     connection, output_filename = get_input_args()
     legup_database = LegUpDatabase(connection)
+    legup_database.convert(output_filename)
 
 
 if __name__ == "__main__":
     main()
-
