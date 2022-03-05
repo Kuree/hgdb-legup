@@ -81,7 +81,7 @@ class LegUpDatabase:
         # the only breakpoints available is through IR instructions
         self.cursor.execute(
             "SELECT ir.id, functionId, startStateId, endStateId, filePath, lineNumber, columnNumber FROM "
-            "IRInstr ir INNER JOIN Function f on f.id = ir.functionID WHERE f.designID = ?",
+            "IRInstr ir INNER JOIN `Function` f on f.id = ir.functionID WHERE f.designID = ?",
             self.top_id)
         res = self.cursor.fetchall()
         for ir_id, func_id, start_id, end_id, file, line, column in res:
@@ -90,7 +90,7 @@ class LegUpDatabase:
     def __get_rtl_vars(self):
         # reads out all the RTL signals
         self.cursor.execute("SELECT r.id, functionID, signalName "
-                            "FROM RtlSignal r INNER JOIN Function f ON f.id = r.functionId WHERE f.designId = ?",
+                            "FROM RtlSignal r INNER JOIN `Function` f ON f.id = r.functionId WHERE f.designId = ?",
                             self.top_id)
         res = self.cursor.fetchall()
         for r_id, func_id, name in res:
