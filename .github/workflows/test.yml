@@ -22,6 +22,8 @@ jobs:
       shell: bash
       run: |
         ./scripts/setup_db.sh
+        docker exec -i legup mysql -pletmein -e "CREATE DATABASE legupDebug;"
+        docker exec -i legup mysql -pletmein legupDebug < data-dump.sql
     - name: Install inspect2hgdb
       shell: bash
       run: pip install .
