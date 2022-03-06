@@ -196,33 +196,46 @@ class LegUpDatabase:
         # map the file, line, column to bp id so that later one we can use it to map
         # context values
         bp_location = {}
+        # Inspect generates lots of same IR with the same line, need to merge them
+        bp_index = {}
         for func_id, bps in scopes.items():
             for ir_id, start_id, end_id, file, line, column in bps:
                 for inst_id in func_id_instances[func_id]:
                     start_value = self.states[start_id][-1]
                     end_value = self.states[end_id][-1]
-                    # this is a hardcoded value in inspect from the source code
-                    var = "cur_state"
-
-                    if inst_id not in scope_list:
-                        scope_list[inst_id] = {}
-                    if func_id not in scope_list[inst_id]:
-                        scope_list[inst_id][func_id] = []
-                    scope_list[inst_id][func_id].append(bp_id)
 
                     # compute condition
-                    conditions = []
+                    conditions = set()
                     for i in range(start_value, end_value + 1):
-                        conditions.append(f"({var} == {i})")
-                    cond = " || ".join(conditions)
+                        conditions.add(i)
 
-                    db.store_breakpoint(bp_id, inst_id, file, line, column, cond)
+                    entry = (func_id, inst_id, file, line, column)
+                    if entry not in bp_index:
+                        bp_index[entry] = set()
+                    # merge them
+                    bp_index[entry] = bp_index[entry].union(conditions)
 
-                    # store the location for mapping
-                    if func_id not in bp_location:
-                        bp_location[func_id] = {}
-                    bp_location[func_id][bp_id] = (file, line)
-                    bp_id += 1
+        for (func_id, inst_id, file, line, column), conditions in bp_index.items():
+            # this is a hardcoded value in inspect from the source code
+            var = "cur_state"
+            cond_strs = []
+            for cond in conditions:
+                cond_strs.append(f"({var} == {cond})")
+            cond_str = " || ".join(cond_strs)
+            db.store_breakpoint(bp_id, inst_id, file, line, column, cond_str)
+
+            # store the location for mapping
+            if func_id not in bp_location:
+                bp_location[func_id] = {}
+            bp_location[func_id][bp_id] = (file, line)
+
+            if inst_id not in scope_list:
+                scope_list[inst_id] = {}
+            if func_id not in scope_list[inst_id]:
+                scope_list[inst_id][func_id] = []
+            scope_list[inst_id][func_id].append(bp_id)
+
+            bp_id += 1
 
         scope_id = 0
         for scopes in scope_list.values():
