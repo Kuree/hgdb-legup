@@ -58,6 +58,7 @@ class LegUpDatabase:
         self.__get_breakpoints()
         self.__get_rtl_vars()
         self.__get_variables()
+        self.__get_variable_link()
 
     def __get_design_top(self):
         self.cursor.execute("SELECT id FROM Designs")
