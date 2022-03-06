@@ -73,7 +73,7 @@ class LegUpDatabase:
 
     def __get_scopes(self):
         # in LegUp they callit functions. we treat it as scopes
-        self.cursor.execute("SELECT id, name FROM `Function` WHERE designId = %s", (self.top_id, ))
+        self.cursor.execute("SELECT id, name FROM `Function` WHERE designId = %s", (self.top_id,))
         res = self.cursor.fetchall()
         for func_id, func_name in res:
             self.scopes[func_id] = func_name
