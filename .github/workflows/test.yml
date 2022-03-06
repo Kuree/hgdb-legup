@@ -20,13 +20,24 @@ jobs:
       run: python -c "import sys; print(sys.version)"
     - name: Sutup test environment 🛠️
       shell: bash
+      run: tar xzf tests/vectors/data.tar.gz -C `pwd`
+    - name: Shutdown Ubuntu MySQL
+      run: sudo service mysql stop
+    - name: Setup MySQL
+      uses: mirromutth/mysql-action@v1.1
+      with:
+        mysql database: 'legupDebug'
+        mysql root password: letmein
+    - name: Import SymbolTable
+      shell: bash
       run: |
-        ./scripts/setup_db.sh
-        docker exec -i legup mysql -pletmein -e "CREATE DATABASE legupDebug;"
-        docker exec -i legup mysql -pletmein legupDebug < data-dump.sql
+        sleep 15 # wait for mysql to come up
+        mysql -h127.0.0.1 -pletmein legupDebug -uroot < data-dump.sql
     - name: Install inspect2hgdb
       shell: bash
-      run: pip install .
+      run: |
+        pip install .
+        pip install pytest
     - name: Run tests ⚙️
       shell: bash
       run: |
